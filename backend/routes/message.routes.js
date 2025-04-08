@@ -10,6 +10,9 @@ router.use(authenticateToken);
 // Get messages
 router.get('/', messageController.getMessages);
 
+// Get recent conversations for a user
+router.get('/conversations', messageController.getConversations);
+
 // Send a message
 router.post('/send', messageController.sendMessage);
 

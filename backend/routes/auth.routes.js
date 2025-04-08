@@ -11,5 +11,6 @@ router.post('/login', authController.login);
 // Protected routes - require authentication
 router.get('/users/me', authenticateToken, authController.getCurrentUser);
 router.get('/users', authenticateToken, authController.getAllUsers);
+router.get('/users/:userId', authenticateToken, authController.getUserById);
 
 module.exports = router;

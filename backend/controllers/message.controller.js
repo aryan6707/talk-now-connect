@@ -37,6 +37,51 @@ exports.getMessages = async (req, res) => {
   }
 };
 
+// Get recent conversations for a user
+exports.getConversations = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    
+    // Find the most recent message for each conversation
+    const conversations = await Message.findAll({
+      where: {
+        [Op.or]: [{ senderId: userId }, { receiverId: userId }]
+      },
+      attributes: [
+        [sequelize.fn('MAX', sequelize.col('Message.id')), 'maxId']
+      ],
+      group: [
+        sequelize.literal(`CASE 
+          WHEN senderId = ${userId} THEN receiverId 
+          WHEN receiverId = ${userId} THEN senderId 
+          END`)
+      ],
+      raw: true
+    });
+    
+    if (conversations.length === 0) {
+      return res.json([]);
+    }
+    
+    // Get the full message details for each conversation
+    const messageIds = conversations.map(c => c.maxId);
+    const messageDetails = await Message.findAll({
+      where: { id: messageIds },
+      include: [
+        { model: User, as: 'sender', attributes: ['id', 'name', 'email', 'online'] },
+        { model: User, as: 'receiver', attributes: ['id', 'name', 'email', 'online'] }
+      ],
+      order: [['createdAt', 'DESC']]
+    });
+    
+    res.json(messageDetails);
+    
+  } catch (error) {
+    console.error('Get conversations error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Send a message
 exports.sendMessage = async (req, res) => {
   try {

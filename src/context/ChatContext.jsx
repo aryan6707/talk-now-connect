@@ -2,6 +2,7 @@
 import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
 import { io } from 'socket.io-client';
 import AuthContext from './AuthContext';
+import { toast } from 'sonner';
 
 const ChatContext = createContext();
 
@@ -11,6 +12,7 @@ export const ChatProvider = ({ children }) => {
   const [contacts, setContacts] = useState([]);
   const [activeContact, setActiveContact] = useState(null);
   const [typingUsers, setTypingUsers] = useState({});
+  const [loading, setLoading] = useState(false);
   const { user, token } = useContext(AuthContext);
   
   // Initialize socket connection when token is available
@@ -28,6 +30,7 @@ export const ChatProvider = ({ children }) => {
     
     newSocket.on('connect_error', (err) => {
       console.error('Socket connection error:', err.message);
+      toast.error('Connection error: ' + err.message);
     });
     
     setSocket(newSocket);
@@ -46,7 +49,19 @@ export const ChatProvider = ({ children }) => {
     
     // Listen for incoming messages
     socket.on('new_message', (message) => {
+      console.log('Received new message:', message);
       setMessages((prevMessages) => [...prevMessages, message]);
+      
+      // If message is from active contact, mark as read
+      if (activeContact && message.senderId === activeContact.id) {
+        markMessageAsRead(message.id);
+      } else {
+        // Notification for message from non-active contact
+        const sender = contacts.find(c => c.id === message.senderId);
+        if (sender) {
+          toast(`New message from ${sender.name}`);
+        }
+      }
     });
     
     // Listen for typing indicators
@@ -81,13 +96,14 @@ export const ChatProvider = ({ children }) => {
       socket.off('message_read');
       socket.off('user_status');
     };
-  }, [socket]);
+  }, [socket, activeContact, contacts]);
   
   // Fetch contacts/users
   const fetchContacts = useCallback(async () => {
     if (!token) return;
     
     try {
+      setLoading(true);
       const response = await fetch('http://localhost:5000/api/users', {
         headers: {
           Authorization: `Bearer ${token}`
@@ -99,11 +115,16 @@ export const ChatProvider = ({ children }) => {
       }
       
       const data = await response.json();
-      setContacts(data);
+      // Filter out current user from contacts list
+      const filteredContacts = data.filter(contact => contact.id !== user?.id);
+      setContacts(filteredContacts);
     } catch (error) {
       console.error('Error fetching contacts:', error);
+      toast.error('Failed to load contacts');
+    } finally {
+      setLoading(false);
     }
-  }, [token]);
+  }, [token, user]);
   
   // Set current contact and fetch messages
   const setCurrentContact = useCallback(async (contact) => {
@@ -112,6 +133,7 @@ export const ChatProvider = ({ children }) => {
     if (!user || !contact) return;
     
     try {
+      setLoading(true);
       const response = await fetch(`http://localhost:5000/api/messages?userId=${user.id}&receiverId=${contact.id}`, {
         headers: {
           Authorization: `Bearer ${token}`
@@ -124,27 +146,49 @@ export const ChatProvider = ({ children }) => {
       
       const data = await response.json();
       setMessages(data);
+      
+      // Mark unread messages as read
+      data.forEach(message => {
+        if (!message.isRead && message.senderId === contact.id) {
+          markMessageAsRead(message.id);
+        }
+      });
     } catch (error) {
       console.error('Error fetching messages:', error);
+      toast.error('Failed to load messages');
+    } finally {
+      setLoading(false);
     }
   }, [user, token]);
   
   // Send message
   const sendMessage = useCallback((content, receiverId) => {
-    if (!socket || !user) return;
+    if (!socket || !user || !content.trim()) return;
     
-    const message = {
-      senderId: user.id,
-      receiverId,
-      content,
-      timestamp: new Date()
-    };
-    
-    // Add message to local state
-    setMessages((prevMessages) => [...prevMessages, message]);
-    
-    // Send via socket
-    socket.emit('private_message', message);
+    try {
+      const message = {
+        senderId: user.id,
+        receiverId,
+        content,
+        timestamp: new Date()
+      };
+      
+      // Add optimistic message to local state
+      const optimisticMessage = {
+        ...message,
+        id: 'temp-' + Date.now(),
+        isRead: false,
+        createdAt: new Date().toISOString()
+      };
+      
+      setMessages((prevMessages) => [...prevMessages, optimisticMessage]);
+      
+      // Send via socket
+      socket.emit('private_message', message);
+    } catch (error) {
+      console.error('Error sending message:', error);
+      toast.error('Failed to send message');
+    }
   }, [socket, user]);
   
   // Send typing indicator
@@ -159,10 +203,27 @@ export const ChatProvider = ({ children }) => {
   
   // Mark message as read
   const markMessageAsRead = useCallback((messageId) => {
-    if (!socket) return;
+    if (!socket || !messageId) return;
     
+    // Update local state first
+    setMessages(prev => prev.map(msg => 
+      msg.id === messageId ? { ...msg, isRead: true } : msg
+    ));
+    
+    // Then notify server
     socket.emit('mark_read', { messageId });
-  }, [socket]);
+    
+    // Also send API request to update in database
+    if (token && !messageId.toString().startsWith('temp-')) {
+      fetch(`http://localhost:5000/api/messages/${messageId}/read`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      }).catch(err => console.error('Error marking message as read:', err));
+    }
+  }, [socket, token]);
   
   return (
     <ChatContext.Provider
@@ -172,6 +233,7 @@ export const ChatProvider = ({ children }) => {
         contacts,
         activeContact,
         typingUsers,
+        loading,
         fetchContacts,
         setCurrentContact,
         sendMessage,
