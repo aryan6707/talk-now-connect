@@ -1,86 +1,93 @@
 
-import React, { createContext, useState, useEffect, useContext } from 'react';
-import io from 'socket.io-client';
+import React, { createContext, useState, useEffect, useContext, useCallback } from 'react';
+import { io } from 'socket.io-client';
 import AuthContext from './AuthContext';
-import { toast } from 'sonner';
 
-export const ChatContext = createContext();
+const ChatContext = createContext();
 
 export const ChatProvider = ({ children }) => {
-  const { user, token } = useContext(AuthContext);
   const [socket, setSocket] = useState(null);
-  const [contacts, setContacts] = useState([]);
   const [messages, setMessages] = useState([]);
+  const [contacts, setContacts] = useState([]);
   const [activeContact, setActiveContact] = useState(null);
   const [typingUsers, setTypingUsers] = useState({});
-  const [loading, setLoading] = useState(false);
+  const { user, token } = useContext(AuthContext);
   
-  // Initialize socket connection
+  // Initialize socket connection when token is available
   useEffect(() => {
-    if (user) {
-      const newSocket = io('http://localhost:5000');
-      setSocket(newSocket);
-      
-      return () => {
+    if (!token) return;
+    
+    // Connect to socket server with auth token
+    const newSocket = io('http://localhost:5000', {
+      auth: { token }
+    });
+    
+    newSocket.on('connect', () => {
+      console.log('Socket connected');
+    });
+    
+    newSocket.on('connect_error', (err) => {
+      console.error('Socket connection error:', err.message);
+    });
+    
+    setSocket(newSocket);
+    
+    // Clean up socket connection on unmount
+    return () => {
+      if (newSocket) {
         newSocket.disconnect();
-      };
-    }
-  }, [user]);
+      }
+    };
+  }, [token]);
   
-  // Socket event listeners
+  // Set up socket event listeners
   useEffect(() => {
-    if (socket && user) {
-      // Let server know user is online
-      socket.emit('user_online', user.id);
-      
-      // Listen for new messages
-      socket.on('new_message', (message) => {
-        setMessages(prevMessages => [...prevMessages, message]);
-        
-        // Notify if message is from someone other than active contact
-        if (activeContact && message.senderId !== activeContact.id) {
-          toast.info(`New message from ${message.senderName || 'a user'}`);
-        }
-      });
-      
-      // Listen for typing indicators
-      socket.on('typing_indicator', ({ senderId, isTyping }) => {
-        setTypingUsers(prev => ({
-          ...prev,
-          [senderId]: isTyping
-        }));
-      });
-      
-      // Listen for user status changes
-      socket.on('user_status', ({ userId, online }) => {
-        setContacts(prevContacts => 
-          prevContacts.map(contact => 
-            contact.id === userId 
-              ? { ...contact, online } 
-              : contact
-          )
-        );
-      });
-      
-      // Listen for read receipts
-      socket.on('message_read', ({ messageId }) => {
-        setMessages(prevMessages => 
-          prevMessages.map(msg => 
-            msg.id === messageId 
-              ? { ...msg, isRead: true } 
-              : msg
-          )
-        );
-      });
-    }
-  }, [socket, user, activeContact]);
+    if (!socket) return;
+    
+    // Listen for incoming messages
+    socket.on('new_message', (message) => {
+      setMessages((prevMessages) => [...prevMessages, message]);
+    });
+    
+    // Listen for typing indicators
+    socket.on('typing_indicator', ({ senderId, isTyping }) => {
+      setTypingUsers((prev) => ({
+        ...prev,
+        [senderId]: isTyping
+      }));
+    });
+    
+    // Listen for read receipts
+    socket.on('message_read', ({ messageId }) => {
+      setMessages((prevMessages) =>
+        prevMessages.map((msg) =>
+          msg.id === messageId ? { ...msg, isRead: true } : msg
+        )
+      );
+    });
+    
+    // Listen for user status changes
+    socket.on('user_status', ({ userId, online }) => {
+      setContacts((prevContacts) =>
+        prevContacts.map((contact) =>
+          contact.id === userId ? { ...contact, online } : contact
+        )
+      );
+    });
+    
+    return () => {
+      socket.off('new_message');
+      socket.off('typing_indicator');
+      socket.off('message_read');
+      socket.off('user_status');
+    };
+  }, [socket]);
   
-  // Fetch contacts
-  const fetchContacts = async () => {
+  // Fetch contacts/users
+  const fetchContacts = useCallback(async () => {
     if (!token) return;
     
     try {
-      setLoading(true);
       const response = await fetch('http://localhost:5000/api/users', {
         headers: {
           Authorization: `Bearer ${token}`
@@ -95,19 +102,17 @@ export const ChatProvider = ({ children }) => {
       setContacts(data);
     } catch (error) {
       console.error('Error fetching contacts:', error);
-      toast.error('Failed to load contacts');
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [token]);
   
-  // Fetch messages for active contact
-  const fetchMessages = async (contactId) => {
-    if (!token || !contactId) return;
+  // Set current contact and fetch messages
+  const setCurrentContact = useCallback(async (contact) => {
+    setActiveContact(contact);
+    
+    if (!user || !contact) return;
     
     try {
-      setLoading(true);
-      const response = await fetch(`http://localhost:5000/api/messages?userId=${user.id}&receiverId=${contactId}`, {
+      const response = await fetch(`http://localhost:5000/api/messages?userId=${user.id}&receiverId=${contact.id}`, {
         headers: {
           Authorization: `Bearer ${token}`
         }
@@ -119,106 +124,59 @@ export const ChatProvider = ({ children }) => {
       
       const data = await response.json();
       setMessages(data);
-      
-      // Mark received messages as read
-      data.forEach(message => {
-        if (message.senderId === contactId && !message.isRead) {
-          markMessageAsRead(message.id);
-        }
-      });
     } catch (error) {
       console.error('Error fetching messages:', error);
-      toast.error('Failed to load messages');
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [user, token]);
   
-  // Send a message
-  const sendMessage = (content, receiverId, isGroupMessage = false) => {
+  // Send message
+  const sendMessage = useCallback((content, receiverId) => {
     if (!socket || !user) return;
     
     const message = {
       senderId: user.id,
-      senderName: user.name,
       receiverId,
       content,
-      timestamp: new Date(),
-      isGroupMessage
+      timestamp: new Date()
     };
     
-    // Emit the message via socket
+    // Add message to local state
+    setMessages((prevMessages) => [...prevMessages, message]);
+    
+    // Send via socket
     socket.emit('private_message', message);
-    
-    // Update local state
-    setMessages(prevMessages => [...prevMessages, {
-      ...message,
-      isRead: false
-    }]);
-    
-    // Also send via API for persistence
-    fetch('http://localhost:5000/api/send-message', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      },
-      body: JSON.stringify({ content, receiverId, isGroupMessage })
-    }).catch(error => console.error('Error sending message via API:', error));
-  };
-  
-  // Mark message as read
-  const markMessageAsRead = (messageId) => {
-    if (!socket || !user) return;
-    
-    socket.emit('mark_read', { messageId, userId: user.id });
-    
-    // Update local state
-    setMessages(prevMessages => 
-      prevMessages.map(msg => 
-        msg.id === messageId 
-          ? { ...msg, isRead: true } 
-          : msg
-      )
-    );
-  };
+  }, [socket, user]);
   
   // Send typing indicator
-  const sendTypingIndicator = (isTyping) => {
+  const sendTypingIndicator = useCallback((isTyping) => {
     if (!socket || !user || !activeContact) return;
     
-    if (isTyping) {
-      socket.emit('typing', { senderId: user.id, receiverId: activeContact.id });
-    } else {
-      socket.emit('stop_typing', { senderId: user.id, receiverId: activeContact.id });
-    }
-  };
+    socket.emit(
+      isTyping ? 'typing' : 'stop_typing',
+      { senderId: user.id, receiverId: activeContact.id }
+    );
+  }, [socket, user, activeContact]);
   
-  // Change active contact
-  const setCurrentContact = (contact) => {
-    setActiveContact(contact);
-    if (contact) {
-      fetchMessages(contact.id);
-    } else {
-      setMessages([]);
-    }
-  };
+  // Mark message as read
+  const markMessageAsRead = useCallback((messageId) => {
+    if (!socket) return;
+    
+    socket.emit('mark_read', { messageId });
+  }, [socket]);
   
   return (
     <ChatContext.Provider
       value={{
         socket,
-        contacts,
         messages,
+        contacts,
         activeContact,
         typingUsers,
-        loading,
         fetchContacts,
-        fetchMessages,
+        setCurrentContact,
         sendMessage,
-        markMessageAsRead,
         sendTypingIndicator,
-        setCurrentContact
+        markMessageAsRead
       }}
     >
       {children}
